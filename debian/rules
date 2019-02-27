@@ -1,0 +1,15 @@
+#!/usr/bin/make -f
+
+WITH_SYSTEMD=$(shell dh --list 2>/dev/null | sed -ne 's/^systemd$$/--with systemd/p')
+
+%:
+	dh $@ --with python2 --buildsystem=python_distutils $(WITH_SYSTEMD)
+
+override_dh_install:
+	dh_install --fail-missing
+ifneq ($(WITH_SYSTEMD),)
+override_dh_installinit:
+	dh_installinit --name=linstor-docker-volume --no-start
+override_dh_systemd_start:
+	dh_systemd_start --no-start
+endif

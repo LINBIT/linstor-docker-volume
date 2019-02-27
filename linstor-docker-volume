@@ -1,0 +1,389 @@
+#!/usr/bin/env python2
+
+# Copyright (C) 2016 LINBIT HA-Solutions GmbH
+# Author: Roland Kammerer <roland.kammerer@linbit.com>
+# Derived from Quobyte Inc, 2016 (also Apache 2.0)
+
+# Licensed under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License. You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+import BaseHTTPServer
+import errno
+import json
+import linstor
+import os
+import socket
+import sys
+import time
+from BaseHTTPServer import BaseHTTPRequestHandler
+try:
+    import ConfigParser as configparser
+except ImportError:
+    import configparser
+
+PLUGIN_DIRECTORY = '/run/docker/plugins/'
+PLUGIN_SOCKET = os.path.join(PLUGIN_DIRECTORY, 'linstor.sock')
+MOUNT_DIRECTORY = '/run/docker/linstor/mnt'
+AUX_PROP_DOCKER_VOLUME = 's-linstor-docker-volume'
+
+
+class UDSServer(BaseHTTPServer.HTTPServer):
+    address_family = socket.AF_UNIX
+    socket_type = socket.SOCK_STREAM
+
+    def __init__(self, server_address, RequestHandlerClass):
+        if os.environ.get('LISTEN_PID', None) == str(os.getpid()):
+            SYSTEMD_FIRST_SOCKET_FD = 3
+            BaseHTTPServer.HTTPServer.__init__(self, server_address,
+                                               RequestHandlerClass, bind_and_activate=False)
+            self.socket = socket.fromfd(SYSTEMD_FIRST_SOCKET_FD,
+                                        self.address_family, self.socket_type)
+        else:
+            try:
+                os.unlink(server_address)
+            except OSError:
+                if os.path.exists(server_address):
+                    raise
+            self.socket = socket.socket(self.address_family, self.socket_type)
+            BaseHTTPServer.HTTPServer.__init__(self, server_address,
+                                               RequestHandlerClass, bind_and_activate=True)
+
+    def get_request(self):
+        ret = self.socket.accept()
+        return ret[0], 'uds'
+
+
+class OSHelper(object):
+    @staticmethod
+    def makedirs(path):
+        try:
+            os.makedirs(path)
+        except OSError as e:
+            if e.errno != errno.EEXIST:
+                raise e
+
+
+class ConfigHelper(object):
+    @staticmethod
+    def read_config(config_file):
+        cp = configparser.SafeConfigParser()
+        cp.read(config_file)
+        config = {}
+        for section in cp.sections():
+            config[section] = cp.items(section)
+        return config
+
+    @staticmethod
+    def get_global_section():
+        home_dir = os.path.expanduser("~")
+        config_file_name = "linstor-client.conf"
+        user_conf = os.path.join(home_dir, ".config", "linstor", config_file_name)
+        sys_conf = os.path.join('/etc', 'linstor', config_file_name)
+
+        entries = None
+        if os.path.exists(user_conf):
+            entries = ConfigHelper.read_config(user_conf)
+        elif os.path.exists(sys_conf):
+            entries = ConfigHelper.read_config(sys_conf)
+
+        global_entries = entries.get('global', []) if entries else []
+        return {k: v for k, v in global_entries if global_entries}
+
+    @staticmethod
+    def get_controllers():
+        cfg = ConfigHelper.get_global_section()
+        return cfg.get('controllers', 'linstor://localhost')
+
+
+class LinstorHelper(object):
+    @staticmethod
+    def get_resource_handle(name):
+        return linstor.Resource(name, ConfigHelper.get_controllers())
+
+    @staticmethod
+    def set_resource_dfn_aux_prop(name, key, value):
+        uris = ConfigHelper.get_controllers()
+        uris = linstor.MultiLinstor.controller_uri_list(uris)
+
+        with linstor.MultiLinstor(uris) as lin:
+            lin.resource_dfn_modify(name, {'Aux/'+key: value})
+
+    @staticmethod
+    def get_resource_dfn_having_aux_prop(key, value):
+        # lin.resource_dfn_list()[0].proto_msg.rsc_dfns[1].rsc_dfn_props
+        uris = ConfigHelper.get_controllers()
+        uris = linstor.MultiLinstor.controller_uri_list(uris)
+
+        rl = []
+        with linstor.MultiLinstor(uris) as lin:
+            rs = lin.resource_dfn_list()
+            if rs:
+                dfns = rs[0].proto_msg.rsc_dfns
+                for d in dfns:
+                    valid = False
+                    for p in d.rsc_dfn_props:
+                        if p.key == 'Aux/'+key and p.value == value:
+                            valid = True
+                            break
+                    if valid:
+                        rl.append(d.rsc_name)
+        return rl
+
+    @staticmethod
+    def res_exists(name):
+        res = linstor.Resource(name, ConfigHelper.get_controllers())
+        in_aux = LinstorHelper.get_resource_dfn_having_aux_prop
+        if res.defined and name in in_aux(AUX_PROP_DOCKER_VOLUME, 'true'):
+            return True
+
+        return False
+
+
+class DockerHandler(BaseHTTPRequestHandler):
+    mounts = {}
+    # TODO(rck): mounts are local, we can have local mount counts and decide when to umount the dir
+    # a cluster wide mount count would also be nice, because then we can decide if RMing a resource is OK.
+    # we can use the KV strore for that (as of now not released yet).
+
+    @staticmethod
+    def _getmountpoint(name):
+        return os.path.join(MOUNT_DIRECTORY, name)
+
+    def getmountpoint(self, name):
+        """
+        Returns '' if not locally mounted, else mountpoint in the file system
+        """
+        mountpoint = self._getmountpoint(name)
+
+        with open('/proc/mounts') as fp:
+            for line in fp:
+                try:
+                    if line.split()[1].strip() == mountpoint:
+                        return mountpoint
+                except IndexError:  # this would be a very weird mount output, but...
+                    continue
+
+        return ''
+
+    def get_request(self):
+        length = int(self.headers['content-length'])
+        return json.loads(self.rfile.read(length))
+
+    def respond(self, msg):
+        self.send_response(200)
+        self.send_header('Content-type', 'application/vnd.docker.plugins.v1+json')
+        self.end_headers()
+        print('Responding with {}'.format(json.dumps(msg)))
+        self.wfile.write(json.dumps(msg))
+
+    def do_POST(self):
+        if self.path == '/Plugin.Activate':
+            self.respond({'Implements': ['VolumeDriver']})
+            return
+
+        request = self.get_request()
+        print(request)
+        if 'Name' in request:
+            name = request['Name']
+            mountpoint = self.getmountpoint(name)
+
+        if self.path == '/VolumeDriver.Create':
+            if LinstorHelper.res_exists(name):
+                self.respond({'Err': ''})
+                return
+
+            fs = fs_opts = size = deploy_hosts = deploy_count = storage_pool = False
+
+            if 'Opts' in request and request['Opts']:
+                fs = request['Opts'].get('fs', False)
+                size = request['Opts'].get('size', False)
+                deploy_hosts = request['Opts'].get('nodes', False)
+                deploy_count = request['Opts'].get('replicas', False)
+                fs_opts = request['Opts'].get('fsopts', False)
+                storage_pool = request['Opts'].get('storagepool', False)
+
+            if not fs:
+                fs = 'ext4'
+            if not fs_opts:
+                fs_opts = ''
+            if not storage_pool:
+                storage_pool = 'drbdpool'
+            if not size:
+                size = 100  # 100MB
+            size = int(size)
+            size *= 1024 * 1024
+            if deploy_hosts:
+                deploy_hosts = deploy_hosts.split(',')
+            else:
+                deploy_hosts = []
+            if deploy_count:
+                deploy_count = int(deploy_count)
+            if deploy_hosts and deploy_count:  # hosts win
+                deploy_count = False
+            if not deploy_hosts and not deploy_count:
+                deploy_count = 2
+
+            self.mounts[name] = 0
+            res = LinstorHelper.get_resource_handle(name)
+            res.volumes[0] = linstor.Volume(size)
+
+            try:
+                if deploy_hosts:
+                    for h in deploy_hosts:
+                        res.diskful(h)
+                else:  # count
+                    res.placement.storage_pool = storage_pool
+                    res.autoplace()
+            except Exception as e:
+                self.respond({'Err': ' {}'.format(e)})
+                return
+
+            LinstorHelper.set_resource_dfn_aux_prop(name, AUX_PROP_DOCKER_VOLUME, 'true')
+            res.activate(socket.gethostname())
+            path = res.volumes[0].device_path
+
+            slept = 0
+            while True and slept < 120:
+                try:
+                    with open(path, 'w') as dev:
+                        zeroblk = bytearray('\0')
+                        dev.write(zeroblk)
+                        break
+                except IOError:
+                    sleep_cnt = 2
+                    time.sleep(sleep_cnt)
+                    slept += sleep_cnt
+
+            try:
+                os.system('wipefs -a {}'.format(path))
+            except Exception:
+                pass
+
+            ret = os.system('mkfs -t {} {} {}'.format(fs, fs_opts, path))
+            if ret != 0:
+                self.respond({'Err': 'Could not format {} ({}) as {}'.format(name, path, fs)})
+                return
+
+            self.respond({'Err': ''})
+
+        elif self.path == '/VolumeDriver.Mount':
+            if not LinstorHelper.res_exists(name):
+                self.respond({'Mountpoint': '',
+                              'Err': 'Volume %s does not exist'.format(name)})
+                return
+
+            if mountpoint != '':
+                self.mounts[name] += 1
+                self.respond({'Mountpoint': mountpoint, 'Err': ''})
+                return
+
+            mountpoint = self._getmountpoint(name)
+            OSHelper.makedirs(mountpoint)
+            res = LinstorHelper.get_resource_handle(name)
+            res.activate(socket.gethostname())
+            path = res.volumes[0].device_path
+
+            ret = os.system('mount %s %s' % (path, mountpoint))
+            if ret != 0:
+                self.respond({'Mountpoint': '',
+                              'Err': 'Could not mount {} to {}'.format(path, mountpoint)})
+                return
+
+            self.mounts[name] = 1
+
+            self.respond({'Mountpoint': mountpoint, 'Err': ''})
+
+        elif self.path == "/VolumeDriver.Unmount":
+            if not LinstorHelper.res_exists(name):
+                self.respond({'Err': 'Volume {} does not exist'.format(name)})
+                return
+
+            if mountpoint == '':
+                self.respond({'Err': 'Could not umount {} {} is not mounted'.format(name, mountpoint)})
+                return
+
+            if self.mounts[name] > 0:
+                self.mounts[name] -= 1
+
+            if self.mounts[name] <= 0:
+                ret = os.system('umount %s' % (mountpoint))
+                if ret == 0:
+                    try:
+                        os.rmdir(mountpoint)
+                    except OSError:
+                        pass
+                    res = LinstorHelper.get_resource_handle(name)
+                    res.deactivate(socket.gethostname())
+                else:
+                    self.respond({'Err': 'Could not umount {} ({})'.format(name, mountpoint)})
+                    return
+
+            self.respond({'Err': ''})
+
+        elif self.path == '/VolumeDriver.Remove':
+            if not LinstorHelper.res_exists(name):
+                self.respond({'Err': 'Volume {} does not exist'.format(name)})
+                return
+
+            ret = os.system('drbdsetup events2 --now %s | grep role:Primary' % (name))
+            if mountpoint != '' or ret == 0:
+                self.respond({'Err': 'Can not remove Volume {}; still in use'.format(name)})
+                return
+
+            try:
+                LinstorHelper.get_resource_handle(name).delete()
+                self.mounts.pop(name, None)
+            except Exception:
+                self.respond({'Err': 'Could not remove {}'.format(name)})
+                return
+
+            self.respond({'Err': ''})
+
+        elif self.path == '/VolumeDriver.Path':
+            self.respond({'Mountpoint': mountpoint, 'Err': ''})
+
+        elif self.path == '/VolumeDriver.Get':
+            if LinstorHelper.res_exists(name):
+                self.respond(
+                    {'Volume': {'Name': name, 'Mountpoint': mountpoint},
+                     'Err': ''})
+            else:
+                self.respond(
+                    {'Volume': {},
+                     'Err': 'Volume %s does not exist' % (name)})
+
+        elif self.path == '/VolumeDriver.List':
+            rl = LinstorHelper.get_resource_dfn_having_aux_prop(AUX_PROP_DOCKER_VOLUME, 'true')
+            result = [{'Name': v, 'Mountpoint': self.getmountpoint(v)} for v in rl]
+            self.respond({'Volumes': result, 'Err': ''})
+
+        else:
+            err_msg = 'Unknown API call: {}'.format(self.path)
+            print(err_msg)
+            self.respond({'Err': err_msg})
+
+
+if __name__ == '__main__':
+    if not sys.platform.startswith('linux'):
+        print('This is a GNU/Linux only plugin')
+        sys.exit(1)
+
+    OSHelper.makedirs(MOUNT_DIRECTORY)
+    OSHelper.makedirs(PLUGIN_DIRECTORY)
+
+    server = UDSServer(PLUGIN_SOCKET, DockerHandler)
+    print('Starting server, use <Ctrl-C> to stop')
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        sys.exit(0)

@@ -1,0 +1,5 @@
+include MANIFEST.in
+include COPYING
+include Makefile
+include linstor-docker-volume.8.gz
+include docker-check-rpm.sh

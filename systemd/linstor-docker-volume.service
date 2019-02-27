@@ -1,0 +1,13 @@
+[Unit]
+Description=LINSTOR Docker Volume Plugin
+Documentation=https://docs.linbit.com
+Before=docker.service
+After=network.target linstor-docker-volume.socket
+Requires=linstor-docker-volume.socket
+Wants=docker.service
+
+[Service]
+ExecStart=/usr/bin/python2 /usr/libexec/docker/linstor-docker-volume
+
+[Install]
+WantedBy=multi-user.target

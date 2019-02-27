@@ -1,0 +1,9 @@
+[Unit]
+Description=LINSTOR Docker Volume Plugin
+Documentation=https://docs.linbit.com
+
+[Socket]
+ListenStream=/run/docker/plugins/linstor.sock
+
+[Install]
+WantedBy=sockets.target

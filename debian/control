@@ -1,0 +1,20 @@
+Source: linstor-docker-volume
+Maintainer: LINBIT HA Solutions GmbH <drbd-dev@lists.linbit.com>
+Uploaders: Roland Kammerer <roland.kammerer@linbit.com>
+Section: python
+Priority: optional
+Build-Depends: debhelper (>= 9),
+               dh-python,
+               python-all (>= 2.6.6-3),
+Standards-Version: 3.9.6
+
+Package: linstor-docker-volume
+Architecture: all
+Depends: python-linstor (>= 0.6.2),
+         ${misc:Depends},
+         ${python:Depends}
+Recommends: docker.io (>= 1.8.0) | docker-engine (>= 1.8.0) | docker-ce
+Description: Docker volume plugin for LINSTOR
+ .
+ This plugin makes docker volumes high available by replicating
+ them via DRBD9 and LINSTOR.
