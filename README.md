@@ -1,6 +1,6 @@
 # LINSTOR Docker Volume Plugin
 
-This plugin allows to replicate Docker volume plugins via DRBD and LINSTOR.
+This plugin allows to create Docker volumes replicated via DRBD and LINSTOR.
 
 # Support
 For further products and professional support, please
