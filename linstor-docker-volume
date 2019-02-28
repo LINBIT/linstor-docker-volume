@@ -35,7 +35,8 @@ PLUGIN_DIRECTORY = '/run/docker/plugins/'
 PLUGIN_SOCKET = os.path.join(PLUGIN_DIRECTORY, 'linstor.sock')
 PLUGIN_CONF = '/etc/linstor/docker-volume.conf'
 MOUNT_DIRECTORY = '/run/docker/linstor/mnt'
-AUX_PROP_DOCKER_VOLUME = 's-linstor-docker-volume'
+DATA_DIR = 'data'
+AUX_PROP_DOCKER_VOLUME = 'is-linstor-docker-volume'
 
 
 class UDSServer(BaseHTTPServer.HTTPServer):
@@ -180,6 +181,9 @@ class DockerHandler(BaseHTTPRequestHandler):
     def _getmountpoint(name):
         return os.path.join(MOUNT_DIRECTORY, name)
 
+    def getdatadir(self, name):
+        return os.path.join(self._getmountpoint(name), DATA_DIR)
+
     def getmountpoint(self, name):
         """
         Returns '' if not locally mounted, else mountpoint in the file system
@@ -311,9 +315,10 @@ class DockerHandler(BaseHTTPRequestHandler):
                               'Err': 'Volume %s does not exist'.format(name)})
                 return
 
+            datadir = self.getdatadir(name)
             if mountpoint != '':
                 self.mounts[name] += 1
-                self.respond({'Mountpoint': mountpoint, 'Err': ''})
+                self.respond({'Mountpoint': datadir, 'Err': ''})
                 return
 
             mountpoint = self._getmountpoint(name)
@@ -328,9 +333,10 @@ class DockerHandler(BaseHTTPRequestHandler):
                               'Err': 'Could not mount {} to {}'.format(path, mountpoint)})
                 return
 
+            OSHelper.makedirs(datadir)
             self.mounts[name] = 1
 
-            self.respond({'Mountpoint': mountpoint, 'Err': ''})
+            self.respond({'Mountpoint': datadir, 'Err': ''})
 
         elif self.path == "/VolumeDriver.Unmount":
             if not LinstorHelper.res_exists(name):
@@ -379,12 +385,12 @@ class DockerHandler(BaseHTTPRequestHandler):
             self.respond({'Err': ''})
 
         elif self.path == '/VolumeDriver.Path':
-            self.respond({'Mountpoint': mountpoint, 'Err': ''})
+            self.respond({'Mountpoint': self.getdatadir(name), 'Err': ''})
 
         elif self.path == '/VolumeDriver.Get':
             if LinstorHelper.res_exists(name):
                 self.respond(
-                    {'Volume': {'Name': name, 'Mountpoint': mountpoint},
+                    {'Volume': {'Name': name, 'Mountpoint': self.getdatadir(name)},
                      'Err': ''})
             else:
                 self.respond(
@@ -393,7 +399,7 @@ class DockerHandler(BaseHTTPRequestHandler):
 
         elif self.path == '/VolumeDriver.List':
             rl = LinstorHelper.get_resource_dfn_having_aux_prop(AUX_PROP_DOCKER_VOLUME, 'true')
-            result = [{'Name': v, 'Mountpoint': self.getmountpoint(v)} for v in rl]
+            result = [{'Name': v, 'Mountpoint': self.getdatadir(v)} for v in rl]
             self.respond({'Volumes': result, 'Err': ''})
 
         else:
