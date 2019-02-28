@@ -33,6 +33,7 @@ except ImportError:
 
 PLUGIN_DIRECTORY = '/run/docker/plugins/'
 PLUGIN_SOCKET = os.path.join(PLUGIN_DIRECTORY, 'linstor.sock')
+PLUGIN_CONF = '/etc/linstor/docker-volume.conf'
 MOUNT_DIRECTORY = '/run/docker/linstor/mnt'
 AUX_PROP_DOCKER_VOLUME = 's-linstor-docker-volume'
 
@@ -84,36 +85,55 @@ class ConfigHelper(object):
         return config
 
     @staticmethod
-    def get_global_section():
+    def get_section(section, config_file_name=None):
         home_dir = os.path.expanduser("~")
-        config_file_name = "linstor-client.conf"
-        user_conf = os.path.join(home_dir, ".config", "linstor", config_file_name)
-        sys_conf = os.path.join('/etc', 'linstor', config_file_name)
+        config_file = "linstor-client.conf"
+        user_conf = os.path.join(home_dir, ".config", "linstor", config_file)
+        sys_conf = os.path.join('/etc', 'linstor', config_file)
 
-        entries = None
-        if os.path.exists(user_conf):
-            entries = ConfigHelper.read_config(user_conf)
+        config = None
+        if config_file_name and os.path.exists(config_file_name):
+            config = ConfigHelper.read_config(config_file_name)
+        elif os.path.exists(user_conf):
+            config = ConfigHelper.read_config(user_conf)
         elif os.path.exists(sys_conf):
-            entries = ConfigHelper.read_config(sys_conf)
+            config = ConfigHelper.read_config(sys_conf)
 
-        global_entries = entries.get('global', []) if entries else []
-        return {k: v for k, v in global_entries if global_entries}
+        entries = config.get(section, []) if config else []
+        return {k: v for k, v in entries}
 
     @staticmethod
-    def get_controllers():
-        cfg = ConfigHelper.get_global_section()
-        return cfg.get('controllers', 'linstor://localhost')
+    def get_controllers_api(section='global', config_file_name=None, fallback='linstor://localhost'):
+        controllers = os.environ.get('LS_CONTROLLERS', None)
+        if not controllers:
+            cfg = ConfigHelper.get_section(section, config_file_name)
+            controllers = cfg.get('controllers', fallback)
+
+        return linstor.MultiLinstor.controller_uri_list(controllers)
+
+    @staticmethod
+    def get_controllers(section='global', config_file_name=None, fallback='linstor://localhost'):
+        controller_uri_list = ConfigHelper.get_controllers_api(section, config_file_name, fallback)
+        plugin_specific = ConfigHelper.get_section('global', PLUGIN_CONF)
+        plugin_specific_controllers = plugin_specific.get('controllers', None)
+        if plugin_specific_controllers:
+            specific_list = linstor.MultiLinstor.controller_uri_list(plugin_specific_controllers)
+            for s in specific_list[::-1]:
+                if s not in controller_uri_list:
+                    controller_uri_list.insert(0, s)
+        return controller_uri_list
 
 
 class LinstorHelper(object):
     @staticmethod
     def get_resource_handle(name):
-        return linstor.Resource(name, ConfigHelper.get_controllers())
+        controller_uri_list = ConfigHelper.get_controllers()
+        controller_uri_str = ','.join(controller_uri_list)
+        return linstor.Resource(name, controller_uri_str)
 
     @staticmethod
     def set_resource_dfn_aux_prop(name, key, value):
         uris = ConfigHelper.get_controllers()
-        uris = linstor.MultiLinstor.controller_uri_list(uris)
 
         with linstor.MultiLinstor(uris) as lin:
             lin.resource_dfn_modify(name, {'Aux/'+key: value})
@@ -122,7 +142,6 @@ class LinstorHelper(object):
     def get_resource_dfn_having_aux_prop(key, value):
         # lin.resource_dfn_list()[0].proto_msg.rsc_dfns[1].rsc_dfn_props
         uris = ConfigHelper.get_controllers()
-        uris = linstor.MultiLinstor.controller_uri_list(uris)
 
         rl = []
         with linstor.MultiLinstor(uris) as lin:
@@ -141,7 +160,9 @@ class LinstorHelper(object):
 
     @staticmethod
     def res_exists(name):
-        res = linstor.Resource(name, ConfigHelper.get_controllers())
+        controller_uri_list = ConfigHelper.get_controllers()
+        controller_uri_str = ','.join(controller_uri_list)
+        res = linstor.Resource(name, controller_uri_str)
         in_aux = LinstorHelper.get_resource_dfn_having_aux_prop
         if res.defined and name in in_aux(AUX_PROP_DOCKER_VOLUME, 'true'):
             return True
@@ -204,13 +225,21 @@ class DockerHandler(BaseHTTPRequestHandler):
 
             fs = fs_opts = size = deploy_hosts = deploy_count = storage_pool = False
 
+            plugin_cfg = ConfigHelper.get_section('global', PLUGIN_CONF)
+            fs = plugin_cfg.get('fs', fs)
+            size = plugin_cfg.get('size', size)
+            deploy_hosts = plugin_cfg.get('nodes', deploy_hosts)
+            deploy_count = plugin_cfg.get('replicas', deploy_count)
+            fs_opts = plugin_cfg.get('fsopts', fs_opts)
+            storage_pool = plugin_cfg.get('storagepool', storage_pool)
+
             if 'Opts' in request and request['Opts']:
-                fs = request['Opts'].get('fs', False)
-                size = request['Opts'].get('size', False)
-                deploy_hosts = request['Opts'].get('nodes', False)
-                deploy_count = request['Opts'].get('replicas', False)
-                fs_opts = request['Opts'].get('fsopts', False)
-                storage_pool = request['Opts'].get('storagepool', False)
+                fs = request['Opts'].get('fs', fs)
+                size = request['Opts'].get('size', size)
+                deploy_hosts = request['Opts'].get('nodes', deploy_hosts)
+                deploy_count = request['Opts'].get('replicas', deploy_count)
+                fs_opts = request['Opts'].get('fsopts', fs_opts)
+                storage_pool = request['Opts'].get('storagepool', storage_pool)
 
             if not fs:
                 fs = 'ext4'
