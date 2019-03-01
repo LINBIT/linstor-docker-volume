@@ -1,3 +1,12 @@
+linstor-docker-volume (0.2.0-1) experimental; urgency=medium
+
+  * README.md: fix description
+  * README.md: Add configuration information
+  * config: expose options via /etc/linstor/docker-volume.conf
+  * split system mount point and reported mount point
+
+ -- Roland Kammerer <roland.kammerer@linbit.com>  Fri, 01 Mar 2019 10:59:23 +0100
+
 linstor-docker-volume (0.1.0-1) experimental; urgency=medium
 
   * initial upload
