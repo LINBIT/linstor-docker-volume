@@ -272,6 +272,7 @@ class DockerHandler(BaseHTTPRequestHandler):
                         res.diskful(h)
                 else:  # count
                     res.placement.storage_pool = storage_pool
+                    res.placement.redundancy = deploy_count
                     res.autoplace()
             except Exception as e:
                 self.respond({'Err': ' {}'.format(e)})
