@@ -143,20 +143,16 @@ class LinstorHelper(object):
     def get_resource_dfn_having_aux_prop(key, value):
         # lin.resource_dfn_list()[0].proto_msg.rsc_dfns[1].rsc_dfn_props
         uris = ConfigHelper.get_controllers()
+        auxk = 'Aux/'+key
 
         rl = []
         with linstor.MultiLinstor(uris) as lin:
             rs = lin.resource_dfn_list()
             if rs:
-                dfns = rs[0].proto_msg.rsc_dfns
+                dfns = rs[0].resource_definitions
                 for d in dfns:
-                    valid = False
-                    for p in d.rsc_dfn_props:
-                        if p.key == 'Aux/'+key and p.value == value:
-                            valid = True
-                            break
-                    if valid:
-                        rl.append(d.rsc_name)
+                    if auxk in d.properties and d.properties[auxk] == value:
+                        rl.append(d.name)
         return rl
 
     @staticmethod

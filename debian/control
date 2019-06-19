@@ -10,7 +10,7 @@ Standards-Version: 3.9.6
 
 Package: linstor-docker-volume
 Architecture: all
-Depends: python-linstor (>= 0.6.2),
+Depends: python-linstor (>= 0.9.4),
          ${misc:Depends},
          ${python:Depends}
 Recommends: docker.io (>= 1.8.0) | docker-engine (>= 1.8.0) | docker-ce
