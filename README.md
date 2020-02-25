@@ -1,8 +1,11 @@
-# LINSTOR Docker Volume Plugin
+# DEPRECATION
+This project is deprecated. Please use the go based version of this plugin from [here](https://github.com/LINBIT/linstor-docker-volume-go).
+
+## LINSTOR Docker Volume Plugin
 
 This plugin allows to create Docker volumes replicated via DRBD and LINSTOR.
 
-# Configuration
+## Configuration
 As the plugin has to communicate to the LINSTOR controller via the LINSTOR
 python library, it is important to set the client configuration:
 
@@ -22,7 +25,7 @@ controllers = linstor://hostnameofcontroller
 fs = xfs
 ```
 
-## File system configuration
+### File system configuration
 This is *important*, please read carefully: The plugin creates a n-times redundant, cluster wide, replicated
 DRBD resource and to be able to mount it, it creates a file system on top of that. Most file systems try to
 discard data on creation time. This makes sense, but depending on the features your physical disks support,
@@ -39,6 +42,6 @@ fs = ext4
 fsopts = -E discard
 ```
 
-# Support
+## Support
 For further products and professional support, please
 [contact](http://links.linbit.com/support) us.
